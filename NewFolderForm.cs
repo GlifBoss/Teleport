@@ -1,8 +1,6 @@
 // Copyright (c) 2026 Glif. Licensed under the MIT License. See LICENSE file in the project root for full license information.
-
 using System;
 using System.Drawing;
-using System.IO; // Добавлено для работы с File и Path
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
@@ -10,7 +8,9 @@ namespace Teleport
 {
     public partial class NewFolderForm : Form
     {
-        private const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+        public const int WM_SETREDRAW = 11;
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern IntPtr SendMessage(IntPtr hWnd, int Msg, IntPtr wParam, IntPtr lParam);        private const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
         private enum DWM_WINDOW_CORNER_PREFERENCE
         {
             DWMWCP_DEFAULT = 0,
@@ -20,141 +20,113 @@ namespace Teleport
         }
 
         [DllImport("dwmapi.dll")]
-        private static extern int DwmSetWindowAttribute(
-            IntPtr hwnd,
-            int attr,
-            ref int attrValue,
-            int attrSize);
-
+        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
         public string FolderName { get; private set; } = "";
-
-        private TextBox txtName;
-        private RoundedButton btnOk;
-        private RoundedButton btnCancel;
+        private readonly TextBox txtName;
+        private readonly RoundedButton btnOk;
+        private readonly RoundedButton btnCancel;
 
         public NewFolderForm()
         {
-            // Настройки стиля окна 
-            BackColor = Color.FromArgb(220, 220, 220);
-            ForeColor = Color.White;
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.CenterParent;
-            
             Width = 320;
             Height = 130;
 
-            // --- БЛОК ЧТЕНИЯ ШРИФТА ИЗ INI ---
-            float fontSize = 10f; // Дефолтное значение
-            string settingsFile = Path.Combine(Application.StartupPath, "settings.ini");
-
-            if (File.Exists(settingsFile))
-            {
-                string[] lines = File.ReadAllLines(settingsFile);
-                
-                foreach (string line in lines)
-                {
-                    string trimmedLine = line.Trim();
-                    
-                    if (trimmedLine.StartsWith("FontSize=", StringComparison.OrdinalIgnoreCase))
-                    {
-                        string valueStr = trimmedLine.Substring(9).Trim();
-
-                        if (float.TryParse(valueStr.Replace(',', '.'), 
-                                           System.Globalization.NumberStyles.Any, 
-                                           System.Globalization.CultureInfo.InvariantCulture, 
-                                           out float parsedSize))
-                        {
-                            if (parsedSize > 4 && parsedSize < 72)
-                            {
-                                fontSize = parsedSize;
-                            }
-                        }
-                        break; 
-                    }
-                }
-            }
-
-            // Создаем единый экземпляр шрифта
-            Font customFont = new("Segoe UI Variable Small", fontSize);
-
-            // Поле ввода текста
             txtName = new TextBox()
             {
-                Font = customFont, // Применяем динамический шрифт
                 Left = 22,
-                Top = 25, 
+                Top = 25,
                 Width = 276, 
                 BorderStyle = BorderStyle.FixedSingle,
-                BackColor = Color.FromArgb(200, 200, 200), 
-                ForeColor = Color.Black 
+                Text = "Новая папка"
             };
-            txtName.Text = "Новая папка";
 
-            // Кнопка ОК
             btnOk = new RoundedButton()
             {
-                Text = "OK",
+                Text = "ОК",
                 Width = 133,
                 Height = 34,
                 Left = 22,
-                Top = 72, 
-                ForeColor = Color.FromArgb(255, 0, 0, 0),
-                Font = customFont, // Применяем динамический шрифт
+                Top = 72,
                 TextAlign = ContentAlignment.MiddleCenter,
-                UseCompatibleTextRendering = true
+                UseCompatibleTextRendering = false
             };
+
             btnOk.FlatStyle = FlatStyle.Flat;
             btnOk.UseVisualStyleBackColor = false;
             btnOk.Click += BtnOk_Click;
 
-            // Кнопка Отмена
             btnCancel = new RoundedButton()
             {
                 Text = "Отмена",
                 Width = 133,
                 Height = 34,
                 Left = 165,
-                Top = 72, 
-                ForeColor = Color.FromArgb(255, 0, 0, 0),
-                Font = customFont, // Применяем динамический шрифт
+                Top = 72,
                 TextAlign = ContentAlignment.MiddleCenter,
-                UseCompatibleTextRendering = true
+                UseCompatibleTextRendering = false
             };
+
             btnCancel.FlatStyle = FlatStyle.Flat;
             btnCancel.UseVisualStyleBackColor = false;
             btnCancel.Click += BtnCancel_Click;
 
-            // Добавляем контролы на форму
             Controls.Add(txtName);
             Controls.Add(btnOk);
             Controls.Add(btnCancel);
 
-            this.AcceptButton = btnOk;
-            this.CancelButton = btnCancel;
+            AcceptButton = btnOk;
+            CancelButton = btnCancel;
+            // 1. Сначала применяем глобальную тему ко всему окну
+            ThemeManager.Apply(this);
+            // 2. И сразу после этого принудительно перекрашиваем текст кнопки ОК в нужный зеленый
+            btnOk.ForeColor = ThemeManager.CurrentTheme == "Dark" ? Color.FromArgb(255, 0, 220, 0) : Color.FromArgb(255, 0, 150, 0);
+            // Наследование масштаба шрифта из главного окна
+            this.Shown += NewFolderForm_Shown;
+        }
 
-            // Используем Shown вместо Load — это заставит Windows принудительно
-            // активировать текстовое поле и выделить весь текст в момент появления окна!
-            this.Shown += (s, e) => 
+        private void NewFolderForm_Shown(object? sender, EventArgs e)
+        {
+            if (Owner != null)
             {
-                txtName.Focus();
-                txtName.SelectAll();
-            };
+                Font = Owner.Font;
+                txtName.Font = Owner.Font;
+                btnOk.Font = Owner.Font;
+                btnCancel.Font = Owner.Font;
+            }
+
+            txtName.Focus();
+            txtName.SelectAll();
+
+            // Задаем системные параметры DWM (заголовок) на всякий случай
+            try
+            {
+                int dark = ThemeManager.CurrentTheme == "Dark" ? 1 : 0;
+                DwmSetWindowAttribute(Handle, 20, ref dark, sizeof(int));
+                int borderColor = ThemeManager.CurrentTheme == "Dark" 
+                ? unchecked((int)0x00505050)   
+                : unchecked((int)0x00B4B4B4);
+                DwmSetWindowAttribute(Handle, 34, ref borderColor, sizeof(int));
+            }
+            catch { }
+            // Обновляем окно для отрисовки кастомной рамки
+            this.Invalidate();
         }
 
         private void BtnOk_Click(object? sender, EventArgs e)
         {
             FolderName = txtName.Text.Trim();
-            
             char[] invalidChars = System.IO.Path.GetInvalidFileNameChars();
             if (FolderName.IndexOfAny(invalidChars) >= 0)
             {
-                MessageBox.Show("Имя папки содержит запрещенные символы (\\ / : * ? \" < > |)!", "Внимание", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show("Имя папки содержит недопустимые символы (\\ / : * ? \" < > |)", "Внимание", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
             if (string.IsNullOrEmpty(FolderName))
             {
-                MessageBox.Show("Имя папки не может быть пустым!", "Внимание", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show("Имя папки не может быть пустым", "Внимание", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
@@ -163,31 +135,34 @@ namespace Teleport
 
         private void BtnCancel_Click(object? sender, EventArgs e)
         {
-            DialogResult = DialogResult.Cancel;
+        DialogResult = DialogResult.Cancel;
         }
 
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
-
+            if (this.Handle != IntPtr.Zero)
             try
             {
                 int corner = (int)DWM_WINDOW_CORNER_PREFERENCE.DWMWCP_ROUND;
-                DwmSetWindowAttribute(
-                    Handle,
-                    DWMWA_WINDOW_CORNER_PREFERENCE,
-                    ref corner,
-                    sizeof(int));
-
-                int borderColor = 0x00787878; 
-                DwmSetWindowAttribute(
-                    Handle,
-                    34, 
-                    ref borderColor,
-                    sizeof(uint));    
+                DwmSetWindowAttribute(Handle, DWMWA_WINDOW_CORNER_PREFERENCE, ref corner, sizeof(int));
+                ThemeManager.Apply(this);    
             }
-            catch
+            catch { }
+        }
+
+        // Рисуем рамку вручную под размер окна, учитывая текущую тему
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+
+            Color windowBorderColor = ThemeManager.CurrentTheme == "Dark" 
+            ? Color.FromArgb(80, 80, 80)     
+            : Color.FromArgb(180, 180, 180);  
+
+            using (Pen pen = new Pen(windowBorderColor, 1f))
             {
+            e.Graphics.DrawRectangle(pen, 0, 0, this.Width - 1, this.Height - 1);
             }
         }
     }

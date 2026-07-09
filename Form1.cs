@@ -1,861 +1,322 @@
 // Copyright (c) 2026 Glif. Licensed under the MIT License. See LICENSE file in the project root for full license information.
-
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
-using System.Text;
+using System.Linq;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace Teleport
 {
-    public class Form1 : Form
+    public partial class Form1 : Form
     {
-        // Импорт функции WinAPI для чтения INI-файла
-        [DllImport("kernel32", CharSet = CharSet.Unicode)]
-        private static extern int GetPrivateProfileString(string section, string key, string def, StringBuilder retVal, int size, string filePath);
+        public const int WM_SETREDRAW = 11;
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern IntPtr SendMessage(IntPtr hWnd, int Msg, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("dwmapi.dll")]
+        public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
         private TreeNode? previousNode;
         private readonly string[] files;
         private readonly TreeView treeView = new();
         private bool allowExpandCollapse = false;
         private readonly ImageList imageList = new();
         private readonly Panel topLine = new();
-        private readonly string settingsFile =
-            Path.Combine(
-                Application.StartupPath,
-                "settings.ini");
+        private readonly string settingsFile = Path.Combine(Application.StartupPath, "settings.ini");
+        private readonly Panel scrollBarCover = new Panel();
+        private readonly Panel customThumb = new Panel();
+        private Point dragStartPoint;
+        private Panel progressBg = new Panel(); 
+        private Panel progressFill = new Panel();
+        private Label lblPercent = new Label();
+        private ProgressManager _progressManager;
+        private ConflictForm.ConflictResult? rememberedResult = null;
+        protected override CreateParams CreateParams
+        {
+          get
+          {
+          // Получаем стандартные параметры создания окна
+          CreateParams cp = base.CreateParams;
+        
+          // 0x00020000 - это CS_DROPSHADOW (отключает тень, которая часто дает "шлейф")
+          // 0x00000002 - это CS_HREDRAW | CS_VREDRAW (принудительная перерисовка)
+          cp.ClassStyle |= 0x20002; 
+        
+          return cp;
+          }
+        }
 
         public Form1(string[] args)
-        {         
+        {   
+            this.Opacity = 0;
             files = args ?? Array.Empty<string>();
-
-            Text = "Телепорт 1.4";
-            Width = 380;
+            Text = "Телепорт 1.5";
             Height = 680;
-            StartPosition = FormStartPosition.CenterScreen;
-            BackColor = Color.FromArgb(30, 30, 30);
+            this.StartPosition = FormStartPosition.Manual;
+            this.Visible = false;
+            this.FormBorderStyle = FormBorderStyle.Sizable;
 
-            // --- БЛОК ЧТЕНИЯ ШРИФТА ИЗ INI ---
-            float fontSize = 10f; // Дефолтное значение
+            float fontSize = 8f;
+            string themeFromIni = "Dark"; 
 
-if (File.Exists(settingsFile))
-{
-    // Читаем весь файл построчно, .NET сам разберётся с любой кодировкой UTF-8
-    string[] lines = File.ReadAllLines(settingsFile);
-    
-    foreach (string line in lines)
-    {
-        string trimmedLine = line.Trim();
-        
-        // Ищем строку, которая начинается с FontSize=
-        if (trimmedLine.StartsWith("FontSize=", StringComparison.OrdinalIgnoreCase))
-        {
-            // Забираем всё, что идёт после знака "="
-            string valueStr = trimmedLine.Substring(9).Trim();
-
-            // Парсим в float (с заменой запятой на точку на всякий случай)
-            if (float.TryParse(valueStr.Replace(',', '.'), 
-                               System.Globalization.NumberStyles.Any, 
-                               System.Globalization.CultureInfo.InvariantCulture, 
-                               out float parsedSize))
+            if (File.Exists(settingsFile))
             {
-                if (parsedSize > 4 && parsedSize < 72)
+                foreach (string line in File.ReadAllLines(settingsFile))
                 {
-                    fontSize = parsedSize;
+                    string trimmedLine = line.Trim();
+                    if (string.IsNullOrEmpty(trimmedLine) || trimmedLine.StartsWith(";") || trimmedLine.StartsWith("#")) continue;
+                    int commentIndex = trimmedLine.IndexOfAny(new char[] { ';', '#' });
+                    if (commentIndex != -1) trimmedLine = trimmedLine.Substring(0, commentIndex).Trim();
+
+                    if (trimmedLine.StartsWith("FontSize=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (float.TryParse(trimmedLine.Substring(9).Replace(',', '.'), NumberStyles.Any, CultureInfo.InvariantCulture, out float parsedSize))
+                        {
+                            if (parsedSize > 4 && parsedSize < 72) fontSize = parsedSize;
+                        }
+                    }
+                    else if (trimmedLine.StartsWith("Theme=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        themeFromIni = trimmedLine.Substring(6).Trim();
+                    }
                 }
             }
-            break; // Нашли нужную строку, выходим из цикла
-        }
-    }
-}
-           // Применяем считанный или дефолтный шрифт
-            Font = new Font("Segoe UI Variable Small", fontSize);
 
-            Icon = Icon.ExtractAssociatedIcon(
-                Application.ExecutablePath);
-
+            ThemeManager.Initialize(themeFromIni);
+            ThemeManager.Apply(this);
+            this.BackColor = ThemeManager.BackColor;
+            
+            Font = FontFamily.Families.Any(f => f.Name == "Segoe UI Variable Small") 
+            ? new Font("Segoe UI Variable Small", fontSize) 
+            : new Font("Segoe UI", fontSize);
+            treeView.Font = this.Font;
+            AdjustWidthByFontSize();
+            
+            Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
             imageList.ImageSize = new Size(16, 16);
             imageList.ColorDepth = ColorDepth.Depth32Bit;
-
             LoadFolderIcon();
 
             topLine.Height = 1;
-            topLine.BackColor = Color.FromArgb(200, 200, 200);
-            topLine.Anchor =
-            AnchorStyles.Top |
-            AnchorStyles.Left |
-            AnchorStyles.Right;
+            topLine.Dock = DockStyle.Top;
+            topLine.BackColor = ThemeManager.AccentColor;
+
             treeView.Dock = DockStyle.Fill;
+            treeView.BorderStyle = BorderStyle.None;
             treeView.ShowPlusMinus = true;
             treeView.ShowLines = false;
             treeView.ShowRootLines = true;
             treeView.FullRowSelect = false;
-            treeView.BackColor = Color.FromArgb(235, 235, 235);
-            treeView.ForeColor = Color.Black;
-            treeView.BorderStyle = BorderStyle.None;
             treeView.HideSelection = false;
+            treeView.ImageList = imageList;
+            EnableDoubleBuffering(treeView);
+
+            scrollBarCover.Width = 22;
+            scrollBarCover.Dock = DockStyle.Right;
+            scrollBarCover.BackColor = ThemeManager.BackColor; 
+            customThumb.Width = 10;
+            customThumb.Height = 40;
+            customThumb.BackColor = ThemeManager.CurrentTheme == "Dark" ? Color.FromArgb(80, 80, 80) : Color.FromArgb(180, 180, 180);
+            customThumb.Cursor = Cursors.SizeNS;
+            customThumb.Location = new Point(6, 5);
+            customThumb.Paint += DrawRoundedPanel;
+            customThumb.MouseEnter += (s, e) => { customThumb.Tag = "hover"; customThumb.Invalidate(); };
+            customThumb.MouseLeave += (s, e) => { customThumb.Tag = ""; customThumb.Invalidate(); };
+            customThumb.MouseDown += (s, e) => dragStartPoint = e.Location;
+            customThumb.MouseMove += customThumb_MouseMove;
+            scrollBarCover.Controls.Add(customThumb);
+
+            Panel footerPanel = new Panel { Height = 31, Dock = DockStyle.Bottom, BackColor = ThemeManager.BackColor };
+            this.Controls.Add(footerPanel);
+            
+            Panel bottomLine = new Panel { Height = 1, Dock = DockStyle.Top, BackColor = ThemeManager.AccentColor };
+            footerPanel.Controls.Add(bottomLine);
+
+            Panel footerContent = new Panel { Dock = DockStyle.Fill, Padding = new Padding(5, 0, 5, 0) };
+            footerPanel.Controls.Add(footerContent);
+
+            lblPercent.Text = "0%";
+            lblPercent.Font = new Font("Segoe UI", 8f);
+            lblPercent.AutoSize = true;
+            lblPercent.Dock = DockStyle.Right;
+            lblPercent.TextAlign = ContentAlignment.MiddleCenter;
+            lblPercent.Padding = new Padding(0, 6, 0, 0);
+            footerContent.Controls.Add(lblPercent);
+
+            Panel progressWrapper = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10, 13, 50, 12) };
+            footerContent.Controls.Add(progressWrapper);
+
+            progressBg.Dock = DockStyle.Fill;
+            progressBg.BackColor = ThemeManager.CurrentTheme == "Dark" ? Color.FromArgb(80, 80, 80) : Color.FromArgb(180, 180, 180);
+            progressWrapper.Controls.Add(progressBg);
+
+            progressFill.Dock = DockStyle.Left;
+            progressFill.BackColor = Color.FromArgb(0, 127, 255);
+            progressFill.Width = 0; 
+            progressBg.Controls.Add(progressFill);
+            
+            _progressManager = new ProgressManager(progressBg, progressFill, lblPercent);
+            
+            bottomLine.BringToFront();
+            
+            Panel treeContainer = new Panel { Dock = DockStyle.Fill };
+            treeContainer.Controls.Add(treeView);
+            treeContainer.Controls.Add(scrollBarCover);
+            
+            this.Controls.Add(treeContainer);
+            treeContainer.BringToFront();
+            this.Controls.Add(topLine);
+            
+            treeView.HandleCreated += (s, e) => { treeView.BackColor = ThemeManager.BackColor; treeView.ForeColor = ThemeManager.TextColor; };
+            LoadFolders();
+
+            treeView.BeforeExpand += TreeView_BeforeExpand;
+            treeView.AfterExpand += (s, e) => { TreeView_AfterExpand(s, e); UpdateScrollbar(); };
+            treeView.AfterCollapse += (s, e) => { UpdateScrollbar(); };
+            treeView.AfterSelect += TreeView_AfterSelect;
+            treeView.NodeMouseDoubleClick += TreeView_NodeMouseDoubleClick;
+            treeView.KeyDown += TreeView_KeyDown;
+            treeView.MouseDown += TreeView_MouseDown;
+            treeView.BeforeCollapse += TreeView_BeforeCollapse;
+            treeView.Resize += (s, e) => UpdateScrollbar();
+            treeView.MouseWheel += (s, e) => BeginInvoke(new Action(UpdateScrollbar));
             treeView.DrawMode = TreeViewDrawMode.OwnerDrawText;
             treeView.DrawNode += TreeView_DrawNode;
-            treeView.ImageList = imageList;
+            treeView.Resize += (s, e) => { treeView.Region = new Region(new Rectangle(0, 0, treeView.Width - 25, treeView.Height)); };
 
-            Controls.Add(treeView);
-            Controls.Add(topLine);
+            string lastPath = GetLastPath();
+            this.BeginInvoke(new Action(() => {
+            treeView.BeginUpdate();
+            scrollBarCover.Visible = false;
+            try { if (!string.IsNullOrEmpty(lastPath) && Directory.Exists(lastPath)) ExpandToPath(lastPath); else treeView.SelectedNode = null; }
+            finally { UpdateScrollbar(); treeView.EndUpdate(); }
+            }));
+            Rectangle screen = Screen.PrimaryScreen.WorkingArea;
+            this.Location = new Point(
+            (screen.Width - this.Width) / 2,
+            (screen.Height - this.Height) / 2
+            );
+        }
 
-LoadFolders();
-
-PositionTeraCopyLines();
-
-topLine.BringToFront();
-
-    treeView.BeforeExpand += TreeView_BeforeExpand;
-    treeView.AfterExpand += TreeView_AfterExpand;
-    treeView.AfterSelect += TreeView_AfterSelect;
-    treeView.NodeMouseDoubleClick += TreeView_NodeMouseDoubleClick;
-    treeView.KeyDown += TreeView_KeyDown;
-    treeView.MouseDown += TreeView_MouseDown;
-    treeView.BeforeCollapse += TreeView_BeforeCollapse;
-    treeView.DrawMode = TreeViewDrawMode.OwnerDrawText;
-    treeView.DrawNode += TreeView_DrawNode;
-
-    string lastPath = GetLastPath();
-
-    ExpandToPath(lastPath);
-
-    }
-private void PositionTeraCopyLines()
-{
-topLine.SetBounds(
-    0,
-    0,
-    ClientSize.Width,
-    1);
-}        
-    private string ShortName(string text)
-    {
-        const int maxLen = 22;
-
-        if (text.Length <= maxLen)
-            return text;
-
-        return text.Substring(0, maxLen - 3) + "...";
-    }
-
-    private string GetLastPath()
-    {
-        try
+        public void UpdateScrollbar()
         {
-            if (!File.Exists(settingsFile))
-                return "";
+            var allVisibleNodes = GetAllVisibleNodes(treeView.Nodes);
+            int totalCount = allVisibleNodes.Count;
+            int visibleCount = treeView.VisibleCount;
 
-            foreach (string line in File.ReadAllLines(settingsFile))
+            if (totalCount <= visibleCount || visibleCount == 0)
             {
-                if (line.StartsWith("LastPath="))
-                    return line.Substring(9);
-            }
-        }
-        catch
-        {
-        }
-
-        return "";
-    }
-    
-    private void ExpandToPath(string fullPath)
-    {
-        if (string.IsNullOrEmpty(fullPath))
+            scrollBarCover.Visible = false;
             return;
-
-        foreach (TreeNode rootNode in treeView.Nodes)
-        {
-            string nodePath = rootNode.Tag?.ToString() ?? "";
-            if (fullPath.StartsWith(nodePath,
-                StringComparison.OrdinalIgnoreCase))
-            {
-                ExpandNodeRecursive(rootNode, fullPath);
-                break;
             }
+            scrollBarCover.Visible = true;
+            float ratio = (float)visibleCount / (float)totalCount;
+            customThumb.Height = Math.Max(30, (int)(scrollBarCover.Height * ratio));
+            int topIndex = treeView.TopNode != null ? allVisibleNodes.IndexOf(treeView.TopNode) : 0;
+            int maxTop = scrollBarCover.Height - customThumb.Height;
+            float posRatio = (float)topIndex / (float)Math.Max(1, totalCount - visibleCount);
+            customThumb.Top = (int)(posRatio * maxTop);
+            customThumb.Invalidate();
         }
-    }    
 
-    private void ExpandNodeRecursive(
-        TreeNode node,
-        string targetPath)
-    {
-        string currentPath =
-            node.Tag?.ToString() ?? "";
-        if (string.Equals(
-        currentPath,
-        targetPath,
-        StringComparison.OrdinalIgnoreCase))
-    {
-        treeView.SelectedNode = node;
-        node.BackColor = Color.FromArgb(70, 70, 70);
-        node.ForeColor = Color.White;
-        node.EnsureVisible();
-        return;
-    }
+        private void EnableDoubleBuffering(Control control)
+        {
+        typeof(Control).InvokeMember("DoubleBuffered", System.Reflection.BindingFlags.SetProperty | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic, null, control, new object[] { true });
+        }
 
-if (!targetPath.StartsWith(
-    currentPath,
-    StringComparison.OrdinalIgnoreCase))
-    return;
+        private void DrawRoundedPanel(object sender, PaintEventArgs e)
+        {
+            Panel p = (Panel)sender;
+            e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            Color baseColor = p.BackColor;
+            Color finalColor = (p.Tag?.ToString() == "hover") 
+            ? (ThemeManager.CurrentTheme == "Dark" ? ControlPaint.Light(baseColor, 0.5f) : ControlPaint.Dark(baseColor, 0.1f)) 
+            : baseColor;
 
-allowExpandCollapse = true;
-node.Expand();
-
-if (node.Nodes.Count > 0)
-{
-            TreeNode firstNode = node.Nodes[0];
-
-            if (firstNode.Text == "loading")
+            using (System.Drawing.Drawing2D.GraphicsPath path = new System.Drawing.Drawing2D.GraphicsPath())
             {
-                TreeView_BeforeExpand(
-                    treeView,
-                    new TreeViewCancelEventArgs(
-                    node,
-                    false,
-                    TreeViewAction.Expand));
+                int radius = 5;
+                path.AddArc(0, 0, radius * 2, radius * 2, 180, 90);
+                path.AddArc(p.Width - radius * 2 - 1, 0, radius * 2, radius * 2, 270, 90);
+                path.AddArc(p.Width - radius * 2 - 1, p.Height - radius * 2 - 1, radius * 2, radius * 2, 0, 90);
+                path.AddArc(0, p.Height - radius * 2 - 1, radius * 2, radius * 2, 90, 90);
+                path.CloseFigure();
+                p.Region = new Region(path);
+                using (SolidBrush brush = new SolidBrush(finalColor)) e.Graphics.FillPath(brush, path);
             }
         }
 
-        foreach (TreeNode child in node.Nodes)
+        private void AdjustWidthByFontSize()
         {
-            string childPath =
-                child.Tag?.ToString() ?? "";
-
-            if (targetPath.StartsWith(
-                childPath,
-                StringComparison.OrdinalIgnoreCase))
+            // 1. Таблица фиксированных значений (Шрифт -> Ширина)
+            var widthMap = new SortedDictionary<float, int>
             {
-                ExpandNodeRecursive(
-                    child,
-                    targetPath);
-                return;
-            }
-        }
-    }
+              { 8.0f, 340 },
+              { 9.0f, 360 },
+              { 10.0f, 380 },
+              { 11.0f, 405 },
+              { 12.0f, 420 },
+              { 13.0f, 440 },
+              { 14.0f, 465 },
+              { 15.0f, 480 },
+              { 16.0f, 500 }
+            };
 
-private void LoadFolders()
-{
-    treeView.Nodes.Clear();
-    // 1. Пункт TeraCopy
-    TreeNode teraNode = new TreeNode("TeraCopy");
-    teraNode.Tag = "__TERACOPY__";
-    teraNode.ImageIndex = 1;
-    teraNode.SelectedImageIndex = 1;
-    treeView.Nodes.Add(teraNode);
+            float currentSize = treeView.Font.Size;
+            int maxWidth = 600; // Максимальная ширина, если шрифт > 14
+            int targetWidth;
 
-    // 2. Пункт: В новую папку
-    TreeNode newFolderNode = new TreeNode("В новую папку");
-    newFolderNode.Tag = "__NEW_FOLDER__";
-    newFolderNode.ImageIndex = 2;
-    newFolderNode.SelectedImageIndex = 2;
-    treeView.Nodes.Add(newFolderNode);
+            // 2. Ищем ближайшее большее или равное значение
+            var foundKey = widthMap.Keys.FirstOrDefault(k => k >= currentSize);
 
-    // 3. Диски
-    foreach (DriveInfo drive in DriveInfo.GetDrives())
-    {
-        try
-        {
-            if (!drive.IsReady)
-                continue;
-
-            TreeNode node = new TreeNode(drive.Name);
-            node.Tag = drive.RootDirectory.FullName;
-            node.Nodes.Add("loading");
-            treeView.Nodes.Add(node);
-        }
-        catch
-        {
-        }
-    }
-}    private void TreeView_BeforeExpand(
-        object? sender,
-        TreeViewCancelEventArgs e)
-    {
-        if (!allowExpandCollapse)
-        {
-            e.Cancel = true;
-            return;
-        }
-        if (e.Node == null)
-            return;
-        if (e.Node.Nodes.Count != 1)
-            return;
-        if (e.Node.Nodes[0].Text != "loading")
-            return;
-        e.Node.Nodes.Clear();
-        string path =
-            e.Node.Tag?.ToString() ?? "";
-        try
-        {
-            foreach (string dir in Directory.GetDirectories(path))
+            if (foundKey != 0)
             {
-                FileAttributes attr =
-                    File.GetAttributes(dir);
-                if ((attr & FileAttributes.Hidden) != 0)
-                    continue;
-                if ((attr & FileAttributes.System) != 0)
-                    continue;
-                TreeNode child =
-                    new TreeNode(
-                        ShortName(
-                            Path.GetFileName(dir)));
-                child.Tag = dir;
-                child.Nodes.Add("loading");
-                e.Node.Nodes.Add(child);
-            }
-        }
-        catch
-        {
-        }
-    }
-    private void TreeView_BeforeCollapse(
-    object? sender,
-    TreeViewCancelEventArgs e)
-{
-    if (!allowExpandCollapse)
-        e.Cancel = true;
-}
-    private void TreeView_MouseDown(
-    object? sender,
-    MouseEventArgs e)
-{
-    TreeViewHitTestInfo hit =
-        treeView.HitTest(e.Location);
-    allowExpandCollapse =
-        hit.Location ==
-        TreeViewHitTestLocations.PlusMinus;
-}
-private void TreeView_AfterExpand(
-    object? sender,
-    TreeViewEventArgs e)
-{
-    TreeNode? expandedNode = e.Node;
-    if (expandedNode == null)
-        return;
-    TreeNodeCollection nodes;
-    if (expandedNode.Parent == null)
-        nodes = treeView.Nodes;
-    else
-        nodes = expandedNode.Parent.Nodes;
-    foreach (TreeNode node in nodes)
-    {
-        if (node != expandedNode)
-        {
-            allowExpandCollapse = true;
-            node.Collapse();
-            allowExpandCollapse = false;
-        }
-    }
-}
-private void TreeView_NodeMouseDoubleClick(
-        object? sender,
-        TreeNodeMouseClickEventArgs e)
-    {
-    if (treeView.SelectedNode == null)
-        return;
-    string dest =
-        treeView.SelectedNode.Tag?.ToString() ?? "";
-    if (dest == "__TERACOPY__")
-    {
-        string listPath =
-            Path.Combine(
-                Path.GetTempPath(),
-                "tc_list.txt");
-        File.WriteAllLines(
-            listPath,
-            files,
-            Encoding.GetEncoding(1251));            
-            System.Diagnostics.Process.Start(
-            @"C:\Program Files\TeraCopy\TeraCopy.exe",
-            "AddList *\"" + listPath + "\"");
-        Close();
-        return;
-    }
-    // --- ВСТАВКА ДЛЯ НОВОЙ ПАПКИ ---
-    if (dest == "__NEW_FOLDER__")
-    {
-        if (files == null || files.Length == 0) return;
-        // Находим папку, в которой лежат исходные файлы
-        string firstFilePath = files[0];
-        string currentDirectory = Path.GetDirectoryName(firstFilePath) ?? "";
-        // Открываем форму ввода имени папки
-        using (NewFolderForm inputForm = new NewFolderForm())
-        {
-            if (inputForm.ShowDialog(this) == DialogResult.OK)
-            {
-                string newFolderName = inputForm.FolderName;
-                // Собираем полный путь к новой папке
-                string targetFolderPath = Path.Combine(currentDirectory, newFolderName);
-                try
-                {
-                    // Создаем папку, если её нет
-                    if (!Directory.Exists(targetFolderPath))
-                    {
-                        Directory.CreateDirectory(targetFolderPath);
-                    }
-
-                    // Подменяем путь назначения на созданную папку!
-                    dest = targetFolderPath; 
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"Не удалось создать папку: {ex.Message}", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    return; // прерываем выполнение, если не удалось создать папку
-                }
+              // Нашли подходящий диапазон
+              targetWidth = widthMap[foundKey];
             }
             else
             {
-                return; // Если нажали Отмена в окне имени папки — ничего не делаем
+              // Если шрифт больше 14 (самого большого в словаре), 
+              // берем сразу maxWidth
+              targetWidth = maxWidth;
             }
+            // 3. Применяем итоговую ширину
+            this.Width = Math.Min(targetWidth, maxWidth);
+            this.PerformLayout();
         }
-    }
-    // --- КОНЕЦ ВСТАВКИ ---
+        private List<TreeNode> GetAllVisibleNodes(TreeNodeCollection nodes)
+        {
+            var list = new List<TreeNode>();
+            foreach (TreeNode node in nodes)
+            {
+            list.Add(node);
+            if (node.IsExpanded) list.AddRange(GetAllVisibleNodes(node.Nodes));
+            }
+            return list;
+        }
 
-    ConflictForm.ConflictResult globalConflictMode =
-    ConflictForm.ConflictResult.Cancel;
-
-    bool conflictModeChosen = false;
-
-    try
-    {
-        File.WriteAllText(
-    settingsFile,
-    "[Settings]" + Environment.NewLine +
-    "LastPath=" + dest + Environment.NewLine +
-    "FontSize=" + this.Font.Size.ToString(System.Globalization.CultureInfo.InvariantCulture));
-    }
-    catch
-    {
-    }
-
-        foreach (string f in files)
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            _ = InitializeFormAsync();
+        }
+        private async Task InitializeFormAsync()
         {
             try
             {
-if (Directory.Exists(f))
-{
-    string targetDir =
-        Path.Combine(
-            dest,
-            new DirectoryInfo(f).Name);
-
-    if (!Directory.Exists(targetDir))
-    {
-        CopyDirectory(f, targetDir);
-        Directory.Delete(f, true);
-        continue;
-    }
-
-    if (!conflictModeChosen)
-    {
-        using ConflictForm form = new();
-
-        if (form.ShowDialog(this)
-            != DialogResult.OK)
-            return;
-
-        globalConflictMode =
-            form.Result;
-
-        conflictModeChosen = true;
-    }
-
-    if (globalConflictMode ==
-        ConflictForm.ConflictResult.Replace)
-    {
-        Directory.Delete(
-            targetDir,
-            true);
-
-        CopyDirectory(
-            f,
-            targetDir);
-
-        Directory.Delete(
-            f,
-            true);
-    }
-    else if (globalConflictMode ==
-             ConflictForm.ConflictResult.Add)
-    {
-        MergeDirectory(
-            f,
-            targetDir);
-
-        Directory.Delete(
-            f,
-            true);
-    }
-}
-else if (File.Exists(f))
-{
-    string targetFile =
-        Path.Combine(
-            dest,
-            Path.GetFileName(f));
-
-    if (!File.Exists(targetFile))
-    {
-        File.Move(f, targetFile);
-        continue;
-    }
-
-if (!conflictModeChosen)
-{
-    using ConflictForm form = new();
-
-    if (form.ShowDialog(this)
-        != DialogResult.OK)
-        return;
-
-    globalConflictMode =
-        form.Result;
-
-    conflictModeChosen = true;
-}
-if (globalConflictMode == ConflictForm.ConflictResult.Replace)
-{
-    // Проверяем, существует ли уже файл по целевому пути
-    if (File.Exists(targetFile))
-    {
-        File.Delete(targetFile); // Если да, удаляем его, чтобы освободить место
-    }
-
-    // Теперь спокойно перемещаем
-    File.Move(f, targetFile);
-}
-else if (globalConflictMode ==
-         ConflictForm.ConflictResult.Add)
-         {
-        string name =
-            Path.GetFileNameWithoutExtension(
-                targetFile);
-
-        string ext =
-            Path.GetExtension(
-                targetFile);
-
-        string stamp =
-            DateTime.Now.ToString(
-                "yyMMddHHmmss");
-
-        string newTarget =
-            Path.Combine(
-                dest,
-                name + "_" +
-                stamp +
-                ext);
-
-        File.Move(
-            f,
-            newTarget);
-    }
-}
+            await Task.Delay(100);
+            this.Opacity = 1;
             }
             catch (Exception ex)
             {
-                MessageBox.Show(
-                    ex.Message,
-                    "Ошибка",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
+            // Логирование ошибки
+            Debug.WriteLine("Ошибка инициализации: " + ex.Message);
             }
         }
-
-        Close();
     }
-    private void TreeView_KeyDown(
-        object? sender,
-        KeyEventArgs e)
-    {
-        if (e.KeyCode == Keys.Enter)
-        {
-            if (treeView.SelectedNode != null)
-            {
-                TreeView_NodeMouseDoubleClick(
-                    treeView,
-                    new TreeNodeMouseClickEventArgs(
-                        treeView.SelectedNode,
-                        MouseButtons.Left,
-                        2,
-                        0,
-                        0));
-            }
-
-            e.SuppressKeyPress = true;
-        }
-    }
-
-private void TreeView_AfterSelect(
-    object? sender,
-    TreeViewEventArgs e)
-{
-    if (previousNode != null)
-    {
-        previousNode.BackColor =
-            treeView.BackColor;
-
-        previousNode.ForeColor =
-            treeView.ForeColor;
-    }
-
-    if (e.Node != null)
-    {
-        e.Node.BackColor =
-            Color.FromArgb(60, 60, 60);
-
-        e.Node.ForeColor =
-            Color.White;
-
-        previousNode = e.Node;
-    }
-}
-
-private void TreeView_DrawNode(
-    object? sender,
-    DrawTreeNodeEventArgs e)
-{
-    Color backColor;
-    Color foreColor = Color.Black;
-
-    if ((e.State & TreeNodeStates.Selected) != 0)
-    {
-        backColor = Color.FromArgb(255, 255, 255);
-        foreColor = Color.FromArgb(0, 0, 255);
-    }
-    else
-    {
-        backColor = treeView.BackColor;
-        foreColor = Color.Black;
-    }
-
-    if (e.Node == null)
-        return;
-
-    using (SolidBrush backBrush =
-        new SolidBrush(backColor))
-    {
-        e.Graphics.FillRectangle(
-            backBrush,
-            e.Bounds);
-    }
-
-    TextRenderer.DrawText(
-        e.Graphics,
-        e.Node?.Text ?? string.Empty,
-        treeView.Font,
-        e.Bounds,
-        foreColor,
-        TextFormatFlags.VerticalCenter);
-}
-
-    private static void CopyDirectory(
-        string sourceDir,
-        string destDir)
-    {
-        Directory.CreateDirectory(destDir);
-
-        foreach (string file in Directory.GetFiles(sourceDir))
-        {
-            string target =
-                Path.Combine(
-                    destDir,
-                    Path.GetFileName(file));
-
-            File.Copy(file, target, true);
-        }
-
-        foreach (string dir in Directory.GetDirectories(sourceDir))
-        {
-            string target =
-                Path.Combine(
-                    destDir,
-                    Path.GetFileName(dir));
-
-            CopyDirectory(dir, target);
-        }
-    }
-
-private void MergeDirectory(
-    string sourceDir,
-    string targetDir)
-{
-    foreach (string dir in
-        Directory.GetDirectories(sourceDir))
-    {
-        string name =
-            Path.GetFileName(dir);
-
-        string targetSubDir =
-            Path.Combine(
-                targetDir,
-                name);
-
-        if (!Directory.Exists(targetSubDir))
-        {
-            Directory.CreateDirectory(
-                targetSubDir);
-        }
-
-        MergeDirectory(
-            dir,
-            targetSubDir);
-    }
-
-    foreach (string file in
-        Directory.GetFiles(sourceDir))
-    {
-        string name =
-            Path.GetFileName(file);
-
-        string targetFile =
-            Path.Combine(
-                targetDir,
-                name);
-
-        if (!File.Exists(targetFile))
-        {
-            File.Move(
-                file,
-                targetFile);
-
-            continue;
-        }
-
-        string stamp =
-            DateTime.Now.ToString(
-                "yyMMddHHmmss");
-
-        string newName =
-            Path.GetFileNameWithoutExtension(
-                targetFile)
-            + "_"
-            + stamp
-            + Path.GetExtension(
-                targetFile);
-
-        string newTarget =
-            Path.Combine(
-                targetDir,
-                newName);
-
-        File.Move(
-            file,
-            newTarget);
-    }
-}
-private void LoadFolderIcon()
-    {
-        SHFILEINFO shinfo = new();
-
-        SHGetFileInfo(
-            Environment.GetFolderPath(
-                Environment.SpecialFolder.Windows),
-            0,
-            ref shinfo,
-            (uint)Marshal.SizeOf(shinfo),
-            SHGFI_ICON | SHGFI_SMALLICON);
-
-        if (shinfo.hIcon != IntPtr.Zero)
-        {
-            // 0. Сначала добавляется системная иконка папки (Индекс 0)
-            imageList.Images.Add(
-                Icon.FromHandle(shinfo.hIcon));
-                
-            // 1. Затем загружается TeraCopy (Индекс 1)
-            string teraIcon =
-                Path.Combine(
-                    Application.StartupPath,
-                    "TeraCopy.ico");
-
-            if (File.Exists(teraIcon))
-            {
-                imageList.Images.Add(
-                    new Icon(teraIcon));
-            }
-
-            // 2. И В САМЫЙ КОНЕЦ добавляем новую иконку (Индекс 2)
-            try
-            {
-                string newFolderIconPath = Path.Combine(Application.StartupPath, "NewFolder.ico");
-                if (File.Exists(newFolderIconPath))
-                {
-                    imageList.Images.Add(new Icon(newFolderIconPath));
-                }
-            }
-            catch { }        
-
-            DestroyIcon(shinfo.hIcon);
-        }
-    }
-    protected override void OnHandleCreated(
-        EventArgs e)
-    {
-        base.OnHandleCreated(e);
-
-        try
-        {
-            int dark = 0;
-
-            DwmSetWindowAttribute(
-                Handle,
-                20,
-                ref dark,
-                sizeof(int));
-                int borderColor =
-                unchecked((int)0x00787878);
-
-                DwmSetWindowAttribute(
-                Handle,
-                34,
-                ref borderColor,
-                sizeof(int));
-        }
-        catch
-        {
-        }
-    }
-
-    [DllImport("shell32.dll")]
-    private static extern IntPtr SHGetFileInfo(
-        string pszPath,
-        uint dwFileAttributes,
-        ref SHFILEINFO psfi,
-        uint cbFileInfo,
-        uint uFlags);
-
-    [DllImport("user32.dll")]
-    private static extern bool DestroyIcon(
-        IntPtr hIcon);
-
-    [DllImport("dwmapi.dll")]
-    private static extern int DwmSetWindowAttribute(
-        IntPtr hwnd,
-        int attr,
-        ref int attrValue,
-        int attrSize);
-    
-    private const uint SHGFI_ICON = 0x100;
-    private const uint SHGFI_SMALLICON = 0x1;
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct SHFILEINFO
-    {
-        public IntPtr hIcon;
-        public int iIcon;
-        public uint dwAttributes;
-
-        [MarshalAs(UnmanagedType.ByValTStr,
-            SizeConst = 260)]
-        public string szDisplayName;
-
-        [MarshalAs(UnmanagedType.ByValTStr,
-            SizeConst = 80)]
-        public string szTypeName;
-    }
-}
-
 }
