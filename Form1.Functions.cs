@@ -78,10 +78,29 @@ namespace Teleport
             {
                 foreach (string f in files)
                 {
-                    if (Directory.Exists(f))
-                    {
-                        await HandleDirectoryMove(f, dest, context);
-                    }
+                if (Directory.Exists(f))
+                {
+                   string targetPath = Path.Combine(dest, new DirectoryInfo(f).Name);
+                   // Проверяем: если мы на одном диске
+                   if (IsSameDrive(f, targetPath))
+                   {
+                   // Проверяем конфликты (вдруг папка с таким именем уже есть)
+                   if (Directory.Exists(targetPath))
+                   {
+                   if (!ResolveConflict(ref targetPath, true)) continue;
+                   }
+                   // Быстрое перемещение (просто меняем путь в системе)
+                   Directory.Move(f, targetPath);
+                   // Обновляем прогресс-бар, чтобы он "заполнился" сразу
+                   totalBytesProcessed += GetDirectorySize(new DirectoryInfo(targetPath));
+                    _progressManager.Update((double)totalBytesProcessed / totalBytesToProcess * 100);
+                   }
+                   else
+                   {
+                   // Если диски разные — запускаем медленное копирование
+                   await HandleDirectoryMove(f, dest, context);
+                   }
+                }
                     else if (File.Exists(f))
                     {
                         string targetPath = Path.Combine(dest, Path.GetFileName(f));
